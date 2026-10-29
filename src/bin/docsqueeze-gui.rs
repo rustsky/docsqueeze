@@ -207,11 +207,13 @@ fn App() -> Element {
                         value: "{amount}", disabled: busy,
                         oninput: move |e| amount.set(e.value()),
                     }
+                    // `selected` on the options, since a select's `value` is
+                    // applied before its options exist.
                     select {
-                        value: "{unit}", disabled: busy,
+                        disabled: busy,
                         onchange: move |e| unit.set(e.value()),
-                        option { value: "KB", "KB" }
-                        option { value: "MB", "MB" }
+                        option { value: "KB", selected: *unit.read() == "KB", "KB" }
+                        option { value: "MB", selected: *unit.read() == "MB", "MB" }
                     }
                 }
                 div { class: "row presets",
