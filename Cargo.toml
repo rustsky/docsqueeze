@@ -11,3 +11,15 @@ hayro-jpeg2000 = "0.4.1"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 lopdf = "0.46.0"
 rayon = "1.12.0"
+dioxus = { version = "0.7.10", features = ["desktop"], optional = true }
+futures-channel = { version = "0.3.34", optional = true }
+futures-util = { version = "0.3.34", optional = true }
+rfd = { version = "0.17.2", optional = true }
+
+[features]
+gui = ["dep:dioxus", "dep:futures-channel", "dep:futures-util", "dep:rfd"]
+
+[[bin]]
+name = "docsqueeze-gui"
+path = "src/bin/docsqueeze-gui.rs"
+required-features = ["gui"]
