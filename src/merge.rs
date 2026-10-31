@@ -164,3 +164,85 @@ fn image_dict(width: u32, height: u32, color_space: &[u8]) -> Dictionary {
         "BitsPerComponent" => 8,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_attributes_move_onto_pages() {
+        // Page tree: root (MediaBox, Rotate) -> mid (Resources) -> page.
+        let mut doc = Document::with_version("1.7");
+        let root_id = doc.new_object_id();
+        let mid_id = doc.new_object_id();
+        let contents = doc.add_object(Stream::new(Dictionary::new(), b"".to_vec()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => mid_id, "Contents" => contents,
+        });
+        doc.objects.insert(mid_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Parent" => root_id, "Kids" => vec![page_id.into()], "Count" => 1,
+            "Resources" => dictionary! { "ProcSet" => vec![Object::Name(b"PDF".to_vec())] },
+        }));
+        doc.objects.insert(root_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![mid_id.into()], "Count" => 1,
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 100.into()], "Rotate" => 90,
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => root_id });
+        doc.trailer.set("Root", catalog);
+        let data = serialize(&mut doc).unwrap();
+
+        let merged = merge(&[Input { data, format: None }]).unwrap();
+
+        let out = Document::load_mem(&merged).unwrap();
+        let pages = out.get_pages();
+        assert_eq!(pages.len(), 1);
+        let page = out.get_dictionary(pages[&1]).unwrap();
+        assert_eq!(page.get(b"Rotate").unwrap().as_i64().unwrap(), 90);
+        assert_eq!(page.get(b"MediaBox").unwrap().as_array().unwrap().len(), 4);
+        assert!(page.get(b"Resources").is_ok());
+    }
+
+    #[test]
+    fn jpeg_is_embedded_unchanged() {
+        let mut jpeg = Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(30, 20, image::Rgb([10, 200, 30]))
+            .write_to(&mut jpeg, ImageFormat::Jpeg)
+            .unwrap();
+        let jpeg = jpeg.into_inner();
+
+        let (stream, w, h) = image_xobject(&jpeg, ImageFormat::Jpeg).unwrap();
+
+        assert_eq!((w, h), (30, 20));
+        assert_eq!(stream.content, jpeg);
+        assert_eq!(stream.dict.get(b"Filter").unwrap().as_name().unwrap(), b"DCTDecode");
+    }
+
+    #[test]
+    fn image_pages_fit_a4_in_matching_orientation() {
+        let png = |w, h| {
+            let mut buf = Cursor::new(Vec::new());
+            image::GrayImage::new(w, h).write_to(&mut buf, ImageFormat::Png).unwrap();
+            Input { data: buf.into_inner(), format: Some(ImageFormat::Png) }
+        };
+
+        let merged = merge(&[png(1000, 500), png(10, 40)]).unwrap();
+
+        let doc = Document::load_mem(&merged).unwrap();
+        let sizes: Vec<(f32, f32)> = doc
+            .get_pages()
+            .into_values()
+            .map(|id| {
+                let mb = doc.get_dictionary(id).unwrap().get(b"MediaBox").unwrap().as_array().unwrap();
+                (mb[2].as_float().unwrap(), mb[3].as_float().unwrap())
+            })
+            .collect();
+        assert_eq!(sizes[0], (PAGE_LONG, PAGE_LONG / 2.0), "wide image fills A4 width");
+        assert_eq!(sizes[1], (PAGE_LONG / 4.0, PAGE_LONG), "tall image fills A4 height");
+    }
+
+    #[test]
+    fn bad_input_is_named_in_error() {
+        let err = merge(&[Input { data: b"junk".to_vec(), format: None }]).unwrap_err();
+        assert!(format!("{err:#}").contains("input #1"), "{err:#}");
+    }
+}

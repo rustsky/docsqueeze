@@ -184,3 +184,30 @@ fn strip_pages(doc: &Document, page_ids: &[ObjectId]) -> Document {
     doc.prune_objects();
     doc
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grayscale_detection_tolerates_noise() {
+        let gray: Vec<u8> = (0..240u8).flat_map(|i| [i, i + 10, i + 5]).collect();
+        assert!(is_grayscale(&gray));
+
+        // 4% colored pixels still count as gray; 10% do not.
+        let with_color = |colored: usize| {
+            (0..100).flat_map(|i| if i < colored { [255, 0, 0] } else { [128, 128, 128] }).collect::<Vec<u8>>()
+        };
+        assert!(is_grayscale(&with_color(4)));
+        assert!(!is_grayscale(&with_color(10)));
+    }
+
+    #[test]
+    fn levels_get_more_aggressive() {
+        for pair in LEVELS.windows(2) {
+            let ((dpi_a, q_a), (dpi_b, q_b)) = (pair[0], pair[1]);
+            assert!(dpi_b <= dpi_a && q_b <= q_a && (dpi_b, q_b) != (dpi_a, q_a), "{pair:?}");
+        }
+        assert!(LEVELS[0].0 <= RENDER_DPI);
+    }
+}
