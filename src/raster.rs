@@ -134,8 +134,10 @@ fn render_page(pdf: &Pdf, idx: usize) -> Option<RenderedPage> {
     // Background is opaque white, so premultiplied RGBA equals straight RGBA.
     let rgb: Vec<u8> = pixmap
         .data_as_u8_slice()
-        .chunks_exact(4)
-        .flat_map(|px| [px[0], px[1], px[2]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
         .collect();
 
     let image = if is_grayscale(&rgb) {
@@ -151,9 +153,11 @@ fn render_page(pdf: &Pdf, idx: usize) -> Option<RenderedPage> {
 /// which tolerates scanner noise and tinted paper.
 fn is_grayscale(rgb: &[u8]) -> bool {
     let colored = rgb
-        .chunks_exact(3)
-        .filter(|px| {
-            let (r, g, b) = (px[0] as i16, px[1] as i16, px[2] as i16);
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|&&[r, g, b]| {
+            let (r, g, b) = (r as i16, g as i16, b as i16);
             (r - g).abs().max((g - b).abs()).max((r - b).abs()) > 28
         })
         .count();
