@@ -4,15 +4,16 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Cursor, Read};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
 use image::{
     DynamicImage, ExtendedColorType, GrayImage, ImageDecoder, ImageFormat, ImageReader, RgbImage,
 };
 use lopdf::{Document, Object, ObjectId};
+use pic_scale::{ImageSize, ImageStore, ImageStoreMut, ResamplingFunction, Scaler};
 use rayon::prelude::*;
 
 mod merge;
@@ -95,6 +96,21 @@ struct Encoded {
 /// are merged into a single PDF in order. When the target cannot be reached,
 /// the smallest achievable result is written; check [`Report::met_target`].
 pub fn run(inputs: &[PathBuf], target: usize, output: Option<PathBuf>, log: Log) -> Result<Report> {
+    // A malformed file can trip a bug in a parser or renderer. Report it as this
+    // file's error rather than killing the GUI worker or the rest of a batch.
+    std::panic::catch_unwind(AssertUnwindSafe(|| shrink(inputs, target, output, log))).unwrap_or_else(
+        |panic| {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            bail!("internal error: {msg}")
+        },
+    )
+}
+
+fn shrink(inputs: &[PathBuf], target: usize, output: Option<PathBuf>, log: Log) -> Result<Report> {
     let Some(first) = inputs.first() else {
         bail!("no input files");
     };
@@ -377,7 +393,7 @@ fn encode(image: &DynamicImage, quality: u8, scale: f32) -> Result<Encoded> {
     let image = if scale < 1.0 {
         let w = ((image.width() as f32 * scale).round() as u32).max(1);
         let h = ((image.height() as f32 * scale).round() as u32).max(1);
-        resized = image.resize_exact(w, h, FilterType::Triangle);
+        resized = resize(image, w, h)?;
         &resized
     } else {
         image
@@ -394,6 +410,30 @@ fn encode(image: &DynamicImage, quality: u8, scale: f32) -> Result<Encoded> {
         encoder.encode(&buf, buf.width(), buf.height(), ExtendedColorType::Rgb8)?;
     }
     Ok(Encoded { data, width: image.width(), height: image.height(), gray })
+}
+
+/// Downscale a gray or RGB image (as produced by [`load_image`]).
+fn resize(image: &DynamicImage, width: u32, height: u32) -> Result<DynamicImage> {
+    let scaler = Scaler::new(ResamplingFunction::Bilinear);
+    let (sw, sh, w, h) = (image.width() as usize, image.height() as usize, width as usize, height as usize);
+    let (src_size, dst_size) = (ImageSize::new(sw, sh), ImageSize::new(w, h));
+    Ok(match image {
+        DynamicImage::ImageLuma8(src) => {
+            let mut out = vec![0; w * h];
+            let plan = scaler.plan_planar_resampling(src_size, dst_size)?;
+            let src = ImageStore::<u8, 1>::from_slice(src.as_raw(), sw, sh)?;
+            plan.resample(&src, &mut ImageStoreMut::<u8, 1>::from_slice(&mut out, w, h)?)?;
+            DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, out).unwrap())
+        }
+        other => {
+            let rgb = other.to_rgb8();
+            let mut out = vec![0; w * h * 3];
+            let plan = scaler.plan_rgb_resampling(src_size, dst_size)?;
+            let src = ImageStore::<u8, 3>::from_slice(rgb.as_raw(), sw, sh)?;
+            plan.resample(&src, &mut ImageStoreMut::<u8, 3>::from_slice(&mut out, w, h)?)?;
+            DynamicImage::ImageRgb8(RgbImage::from_raw(width, height, out).unwrap())
+        }
+    })
 }
 
 fn collect_images(doc: &Document) -> Vec<SourceImage> {
@@ -601,6 +641,29 @@ mod tests {
         let rgb = DynamicImage::ImageRgb8(RgbImage::from_raw(3, 3, pixels(27)).unwrap());
         let tiny = encode(&rgb, 50, 0.01).unwrap();
         assert_eq!((tiny.width, tiny.height, tiny.gray), (1, 1, false));
+    }
+
+    #[test]
+    fn resize_keeps_colors_and_layout() {
+        // Left half black, right half white; RGB right half red.
+        let gray = GrayImage::from_fn(200, 100, |x, _| image::Luma([if x < 100 { 0 } else { 255 }]));
+        let DynamicImage::ImageLuma8(small) = resize(&DynamicImage::ImageLuma8(gray), 50, 25).unwrap()
+        else {
+            panic!("gray stays gray")
+        };
+        assert_eq!(small.dimensions(), (50, 25));
+        assert!(small.get_pixel(5, 12)[0] < 10 && small.get_pixel(45, 12)[0] > 245);
+
+        let rgb = RgbImage::from_fn(90, 60, |x, _| image::Rgb(if x < 45 { [0, 0, 255] } else { [255, 0, 0] }));
+        let DynamicImage::ImageRgb8(small) = resize(&DynamicImage::ImageRgb8(rgb), 31, 7).unwrap() else {
+            panic!("rgb stays rgb")
+        };
+        assert_eq!(small.dimensions(), (31, 7));
+        assert_eq!(small.get_pixel(1, 3).0, [0, 0, 255]);
+        assert_eq!(small.get_pixel(29, 3).0, [255, 0, 0]);
+
+        let tiny = resize(&DynamicImage::ImageRgb8(RgbImage::new(3, 3)), 1, 1).unwrap();
+        assert_eq!((tiny.width(), tiny.height()), (1, 1));
     }
 
     #[test]

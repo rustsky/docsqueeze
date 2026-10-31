@@ -271,3 +271,13 @@ fn report_math() {
     assert!(!over.met_target());
     assert_eq!(docsqueeze::human(1_234_567), "1.23 MB");
 }
+
+#[test]
+fn panics_become_errors() {
+    let dir = TempDir::new().unwrap();
+    let input = write_noise_image(dir.path(), "a.png", 10, 10, ImageFormat::Png);
+
+    let err = run(&[input], 1000, None, &|_| panic!("boom")).unwrap_err();
+
+    assert!(format!("{err:#}").contains("internal error: boom"), "{err:#}");
+}

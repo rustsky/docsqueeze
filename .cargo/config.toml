@@ -1,0 +1,4 @@
+# Windows ships a plain exe with no installer, so link the C runtime statically:
+# otherwise the app fails to start where the VC++ redistributable is missing.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

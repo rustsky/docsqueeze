@@ -16,14 +16,19 @@ Get the latest build from [Releases](../../releases):
 
 | Platform | Desktop app | Command line |
 |---|---|---|
-| Windows | `…-windows-x64-setup.exe`, or the portable `.zip` | in the portable `.zip` |
+| Windows 10/11 | `…-windows-x64.exe` (no install needed) | `docsqueeze-cli-…-windows-x64.zip` |
 | macOS (Apple Silicon and Intel) | `…-macos-universal.dmg` | `docsqueeze-cli-…-macos-universal.tar.gz` |
-| Linux | `…-linux-x86_64.AppImage` | `docsqueeze-cli-…-linux-x86_64.tar.gz` |
+| Linux (any distribution) | `…-linux-x86_64.flatpak` | `docsqueeze-cli-…-linux-x86_64.tar.gz` |
 
 The apps are not signed by Apple or Microsoft, so expect a warning on first
 launch. On macOS, right-click the app and choose **Open**. On Windows, click
-**More info → Run anyway**. On Linux, make the AppImage executable with
-`chmod +x` first.
+**More info → Run anyway**.
+
+On Linux, install the Flatpak with
+`flatpak install --user docsqueeze-…-linux-x86_64.flatpak`. The first install
+also downloads the shared GNOME runtime from Flathub, unless you already have
+it. [Set up Flatpak](https://flathub.org/setup) first if your distribution
+does not include it.
 
 ## Desktop app
 
@@ -73,7 +78,8 @@ cargo install --path .                   # docsqueeze_cli only
 cargo install --path . --features gui    # also installs the Docsqueeze app
 ```
 
-`scripts/bundle-macos.sh` builds the universal macOS app and DMG locally.
+`scripts/bundle-macos.sh` builds the universal macOS app and DMG locally;
+`flatpak/` holds the Linux Flatpak manifest.
 Pushing a `v*` tag builds all platforms and publishes a release
 (`.github/workflows/release.yml`).
 

@@ -34,10 +34,20 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libssl-dev
       - name: Clippy
         run: cargo clippy --locked --all-features --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --all-features
       - name: Build CLI without the GUI
         run: cargo build --locked --bin docsqueeze_cli
+
+  release-profile:
+    # The shipped binaries are size-optimized; check results hold under that profile too.
+    name: Test (release profile)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --release

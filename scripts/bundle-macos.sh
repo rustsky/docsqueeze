@@ -10,7 +10,10 @@ targets=(aarch64-apple-darwin x86_64-apple-darwin)
 
 for target in "${targets[@]}"; do
   rustup target add "$target" >/dev/null
-  cargo build --release --locked --features gui --bins --target "$target"
+  # Separate builds: with the GUI feature on, the CLI would also link every
+  # image format dioxus enables.
+  cargo build --release --locked --bin docsqueeze_cli --target "$target"
+  cargo build --release --locked --features gui --bin Docsqueeze --target "$target"
 done
 
 rm -rf "$out/macos"

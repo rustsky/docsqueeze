@@ -151,3 +151,58 @@ pub fn page_sizes(data: &[u8]) -> Vec<(f32, f32)> {
 pub fn file_size(path: &Path) -> usize {
     std::fs::metadata(path).unwrap().len() as usize
 }
+
+/// A photo-like image: smooth gradients, hard edges and light grain, so JPEG
+/// sizes and quality behave like real scans and photos rather than noise.
+pub fn photo_like(width: u32, height: u32) -> RgbImage {
+    let grain = noise((width * height) as usize, 3);
+    RgbImage::from_fn(width, height, |x, y| {
+        let (fx, fy) = (x as f32 / width as f32, y as f32 / height as f32);
+        let g = grain[(y * width + x) as usize] as f32 / 255.0 * 12.0 - 6.0;
+        let (dx, dy) = (fx - 0.5, fy - 0.5);
+        let disc = if dx * dx + dy * dy < 0.06 { 90.0 } else { 0.0 };
+        let stripe = if (x / 40) % 2 == 0 && fy > 0.75 { 60.0 } else { 0.0 };
+        let px = |v: f32| (v + g).clamp(0.0, 255.0) as u8;
+        image::Rgb([px(40.0 + 180.0 * fx + disc), px(60.0 + 150.0 * fy - stripe), px(200.0 - 120.0 * fx + stripe)])
+    })
+}
+
+/// Peak signal-to-noise ratio in dB at the reference's resolution, so lost
+/// detail from downscaling counts. `test` is scaled up with the `image` crate,
+/// independent of the resizer under test.
+pub fn psnr(reference: &RgbImage, test: &RgbImage) -> f64 {
+    let test = if reference.dimensions() == test.dimensions() {
+        test.clone()
+    } else {
+        image::imageops::resize(test, reference.width(), reference.height(), image::imageops::FilterType::Triangle)
+    };
+    let test = &test;
+    let sum: f64 = reference
+        .as_raw()
+        .iter()
+        .zip(test.as_raw())
+        .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+        .sum();
+    let mse = sum / reference.as_raw().len() as f64;
+    if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0 * 255.0 / mse).log10() }
+}
+
+/// Decoded image XObjects of every page, in page order.
+pub fn page_images(pdf: &[u8]) -> Vec<RgbImage> {
+    let doc = Document::load_mem(pdf).unwrap();
+    let mut out = Vec::new();
+    for page in doc.get_pages().into_values() {
+        let resources = doc.get_page_resources(page).unwrap();
+        let dict = match resources.0 {
+            Some(d) => d.clone(),
+            None => doc.get_dictionary(resources.1[0]).unwrap().clone(),
+        };
+        let xobjects = dict.get(b"XObject").unwrap().as_dict().unwrap();
+        for (_, obj) in xobjects.iter() {
+            let stream = doc.get_object(obj.as_reference().unwrap()).unwrap().as_stream().unwrap();
+            assert_eq!(stream.dict.get(b"Filter").unwrap().as_name().unwrap(), b"DCTDecode");
+            out.push(image::load_from_memory(&stream.content).unwrap().to_rgb8());
+        }
+    }
+    out
+}
