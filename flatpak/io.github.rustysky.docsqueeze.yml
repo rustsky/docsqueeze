@@ -1,0 +1,60 @@
+# Linux app as a Flatpak: the GNOME runtime provides WebKitGTK, so the app
+# itself stays a few MB and runs on any distribution with Flatpak.
+# Local build: flatpak-builder --user --install-deps-from=flathub --force-clean \
+#   build-dir flatpak/io.github.rustysky.docsqueeze.yml
+app-id: io.github.rustysky.docsqueeze
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: docsqueeze
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Dioxus sends UI updates to the web view over a localhost websocket; the
+  # sandboxed WebKit process can't reach it without this. Nothing goes online.
+  - --share=network
+  # Results are saved next to the inputs, which are usually under home.
+  - --filesystem=home
+cleanup:
+  - /include
+modules:
+  # libxdo (linked by the menu library) is not part of the GNOME runtime.
+  - name: libxdo
+    buildsystem: simple
+    build-commands:
+      - make libxdo.so PREFIX=/app
+      - make installlib installheader PREFIX=/app
+    sources:
+      - type: archive
+        url: https://github.com/jordansissel/xdotool/releases/download/v3.20211022.1/xdotool-3.20211022.1.tar.gz
+        sha256: 96f0facfde6d78eacad35b91b0f46fecd0b35e474c03e00e30da3fdd345f9ada
+
+  - name: docsqueeze
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/docsqueeze/cargo
+        # Lets the linker find libxdo; cargo ignores LDFLAGS.
+        LIBRARY_PATH: /app/lib
+      # Crates are downloaded during the build. Fine for release bundles;
+      # Flathub would need them vendored as sources instead.
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --locked --features gui --bin Docsqueeze
+      - install -Dm755 target/release/Docsqueeze /app/bin/docsqueeze
+      - install -Dm644 flatpak/icon-512.png /app/share/icons/hicolor/512x512/apps/io.github.rustysky.docsqueeze.png
+      - install -Dm644 flatpak/io.github.rustysky.docsqueeze.desktop -t /app/share/applications
+      - install -Dm644 flatpak/io.github.rustysky.docsqueeze.metainfo.xml -t /app/share/metainfo
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - dist
+          - .flatpak-builder

@@ -1,0 +1,126 @@
+name: Release builds
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux (Flatpak)
+    runs-on: ubuntu-24.04
+    # flatpak-builder sandboxes builds with bubblewrap, which needs privileges.
+    container:
+      image: fedora:latest
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak-builder
+        run: |
+          dnf -y install flatpak flatpak-builder git
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - uses: actions/cache@v4
+        with:
+          path: .flatpak-builder
+          key: flatpak-${{ hashFiles('flatpak/*.yml', 'Cargo.lock') }}
+          restore-keys: flatpak-
+      - name: Build
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          flatpak-builder --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
+            --repo=repo build-dir flatpak/io.github.rustysky.docsqueeze.yml
+          mkdir -p dist
+          # The runtime repo lets `flatpak install` fetch the GNOME runtime from Flathub.
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            repo "dist/docsqueeze-$version-linux-x86_64.flatpak" io.github.rustysky.docsqueeze
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.flatpak
+
+  linux-cli:
+    name: Linux (CLI)
+    # Oldest supported runner, so the CLI runs on older glibc versions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          cargo build --release --locked --bin docsqueeze_cli
+          mkdir -p dist
+          tar -C target/release -czf "dist/docsqueeze-cli-$version-linux-x86_64.tar.gz" docsqueeze_cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cli
+          path: dist/*.tar.gz
+
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: scripts/bundle-macos.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A plain exe, no installer: Windows 10/11 already ship the WebView2 runtime.
+      - name: Build
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          # Separate builds keep the GUI's extra image formats out of the CLI.
+          cargo build --release --locked --bin docsqueeze_cli
+          cargo build --release --locked --features gui --bin Docsqueeze
+          mkdir -p dist
+          cp target/release/Docsqueeze.exe "dist/docsqueeze-$version-windows-x64.exe"
+          7z a "dist/docsqueeze-cli-$version-windows-x64.zip" ./target/release/docsqueeze_cli.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, linux-cli, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

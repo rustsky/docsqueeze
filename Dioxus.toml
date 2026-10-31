@@ -1,0 +1,10 @@
+[application]
+name = "docsqueeze"
+
+[bundle]
+identifier = "io.github.rustysky.docsqueeze"
+publisher = "rustysky"
+icon = ["assets/icon.png", "assets/icon.icns", "assets/icon.ico"]
+short_description = "Make documents fit upload limits"
+long_description = "Compress PDFs, scans and photos to an exact size and merge them into one PDF."
+category = "Utility"

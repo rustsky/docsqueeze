@@ -4,15 +4,16 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Cursor, Read};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
 use image::{
     DynamicImage, ExtendedColorType, GrayImage, ImageDecoder, ImageFormat, ImageReader, RgbImage,
 };
 use lopdf::{Document, Object, ObjectId};
+use pic_scale::{ImageSize, ImageStore, ImageStoreMut, ResamplingFunction, Scaler};
 use rayon::prelude::*;
 
 mod merge;
@@ -95,6 +96,21 @@ struct Encoded {
 /// are merged into a single PDF in order. When the target cannot be reached,
 /// the smallest achievable result is written; check [`Report::met_target`].
 pub fn run(inputs: &[PathBuf], target: usize, output: Option<PathBuf>, log: Log) -> Result<Report> {
+    // A malformed file can trip a bug in a parser or renderer. Report it as this
+    // file's error rather than killing the GUI worker or the rest of a batch.
+    std::panic::catch_unwind(AssertUnwindSafe(|| shrink(inputs, target, output, log))).unwrap_or_else(
+        |panic| {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            bail!("internal error: {msg}")
+        },
+    )
+}
+
+fn shrink(inputs: &[PathBuf], target: usize, output: Option<PathBuf>, log: Log) -> Result<Report> {
     let Some(first) = inputs.first() else {
         bail!("no input files");
     };
@@ -170,6 +186,38 @@ pub fn default_output(inputs: &[PathBuf], target: usize) -> Result<PathBuf> {
         None => "pdf",
     };
     Ok(first.with_file_name(format!("{stem}-shrunk.{ext}")))
+}
+
+/// Outputs for shrinking each input on its own: [`default_output`] for each,
+/// placed in `dir` when given, with images saved as PDF when `as_pdf`.
+/// Paths never collide with each other or with an input.
+pub fn batch_outputs(
+    inputs: &[PathBuf],
+    target: usize,
+    dir: Option<&Path>,
+    as_pdf: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut taken: HashSet<PathBuf> = inputs.iter().cloned().collect();
+    let mut outputs = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let mut path = default_output(std::slice::from_ref(input), target)?;
+        if as_pdf {
+            path.set_extension("pdf");
+        }
+        if let (Some(dir), Some(name)) = (dir, path.file_name()) {
+            path = dir.join(name);
+        }
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let ext = path.extension().unwrap_or_default().to_string_lossy().into_owned();
+        let mut n = 2;
+        while taken.contains(&path) {
+            path.set_file_name(format!("{stem}-{n}.{ext}"));
+            n += 1;
+        }
+        taken.insert(path.clone());
+        outputs.push(path);
+    }
+    Ok(outputs)
 }
 
 /// Image format from content rather than extension; `None` means PDF.
@@ -345,7 +393,7 @@ fn encode(image: &DynamicImage, quality: u8, scale: f32) -> Result<Encoded> {
     let image = if scale < 1.0 {
         let w = ((image.width() as f32 * scale).round() as u32).max(1);
         let h = ((image.height() as f32 * scale).round() as u32).max(1);
-        resized = image.resize_exact(w, h, FilterType::Triangle);
+        resized = resize(image, w, h)?;
         &resized
     } else {
         image
@@ -362,6 +410,30 @@ fn encode(image: &DynamicImage, quality: u8, scale: f32) -> Result<Encoded> {
         encoder.encode(&buf, buf.width(), buf.height(), ExtendedColorType::Rgb8)?;
     }
     Ok(Encoded { data, width: image.width(), height: image.height(), gray })
+}
+
+/// Downscale a gray or RGB image (as produced by [`load_image`]).
+fn resize(image: &DynamicImage, width: u32, height: u32) -> Result<DynamicImage> {
+    let scaler = Scaler::new(ResamplingFunction::Bilinear);
+    let (sw, sh, w, h) = (image.width() as usize, image.height() as usize, width as usize, height as usize);
+    let (src_size, dst_size) = (ImageSize::new(sw, sh), ImageSize::new(w, h));
+    Ok(match image {
+        DynamicImage::ImageLuma8(src) => {
+            let mut out = vec![0; w * h];
+            let plan = scaler.plan_planar_resampling(src_size, dst_size)?;
+            let src = ImageStore::<u8, 1>::from_slice(src.as_raw(), sw, sh)?;
+            plan.resample(&src, &mut ImageStoreMut::<u8, 1>::from_slice(&mut out, w, h)?)?;
+            DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, out).unwrap())
+        }
+        other => {
+            let rgb = other.to_rgb8();
+            let mut out = vec![0; w * h * 3];
+            let plan = scaler.plan_rgb_resampling(src_size, dst_size)?;
+            let src = ImageStore::<u8, 3>::from_slice(rgb.as_raw(), sw, sh)?;
+            plan.resample(&src, &mut ImageStoreMut::<u8, 3>::from_slice(&mut out, w, h)?)?;
+            DynamicImage::ImageRgb8(RgbImage::from_raw(width, height, out).unwrap())
+        }
+    })
 }
 
 fn collect_images(doc: &Document) -> Vec<SourceImage> {
@@ -502,4 +574,194 @@ fn color_channels(doc: &Document, cs: &Object) -> Option<u32> {
 /// Format a byte count as decimal megabytes.
 pub fn human(bytes: usize) -> String {
     format!("{:.2} MB", bytes as f64 / 1_000_000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::{Dictionary, Stream, dictionary};
+
+    fn pixels(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 7919 % 251) as u8).collect()
+    }
+
+    #[test]
+    fn search_finds_least_aggressive_fitting_level() {
+        let sizes = [100, 90, 80, 70, 60, 50];
+        let mut smallest = Vec::new();
+        let mut calls = 0;
+        let best = search(sizes.len(), 75, &mut smallest, |i| {
+            calls += 1;
+            Ok(vec![0; sizes[i]])
+        })
+        .unwrap();
+        assert_eq!(best.map(|b| b.len()), Some(70));
+        assert!(calls <= 3, "binary search, got {calls} calls");
+        assert!(smallest.len() <= 70);
+    }
+
+    #[test]
+    fn search_reports_none_but_tracks_smallest_when_nothing_fits() {
+        let sizes = [100, 90, 80];
+        let mut smallest = Vec::new();
+        let best = search(sizes.len(), 10, &mut smallest, |i| Ok(vec![0; sizes[i]])).unwrap();
+        assert!(best.is_none());
+        assert_eq!(smallest.len(), 80);
+    }
+
+    #[test]
+    fn search_propagates_errors() {
+        let mut smallest = Vec::new();
+        assert!(search(3, 10, &mut smallest, |_| bail!("boom")).is_err());
+    }
+
+    #[test]
+    fn detects_format_from_content() {
+        assert_eq!(detect_format(b"%PDF-1.7\n..."), None);
+        assert_eq!(detect_format(b"\x89PNG\r\n\x1a\n...."), Some(ImageFormat::Png));
+        assert_eq!(detect_format(b"\xff\xd8\xff\xe0...."), Some(ImageFormat::Jpeg));
+        assert_eq!(detect_format(b"garbage"), None);
+    }
+
+    #[test]
+    fn extension_check_ignores_case() {
+        assert!(has_extension(Path::new("a/B.PDF"), "pdf"));
+        assert!(!has_extension(Path::new("a/b.pdf.jpg"), "pdf"));
+        assert!(!has_extension(Path::new("pdf"), "pdf"));
+    }
+
+    #[test]
+    fn encode_scales_and_keeps_gray() {
+        let gray = DynamicImage::ImageLuma8(GrayImage::from_raw(100, 50, pixels(5000)).unwrap());
+        let enc = encode(&gray, 80, 0.5).unwrap();
+        assert_eq!((enc.width, enc.height, enc.gray), (50, 25, true));
+        let decoded = image::load_from_memory(&enc.data).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::L8);
+
+        let rgb = DynamicImage::ImageRgb8(RgbImage::from_raw(3, 3, pixels(27)).unwrap());
+        let tiny = encode(&rgb, 50, 0.01).unwrap();
+        assert_eq!((tiny.width, tiny.height, tiny.gray), (1, 1, false));
+    }
+
+    #[test]
+    fn resize_keeps_colors_and_layout() {
+        // Left half black, right half white; RGB right half red.
+        let gray = GrayImage::from_fn(200, 100, |x, _| image::Luma([if x < 100 { 0 } else { 255 }]));
+        let DynamicImage::ImageLuma8(small) = resize(&DynamicImage::ImageLuma8(gray), 50, 25).unwrap()
+        else {
+            panic!("gray stays gray")
+        };
+        assert_eq!(small.dimensions(), (50, 25));
+        assert!(small.get_pixel(5, 12)[0] < 10 && small.get_pixel(45, 12)[0] > 245);
+
+        let rgb = RgbImage::from_fn(90, 60, |x, _| image::Rgb(if x < 45 { [0, 0, 255] } else { [255, 0, 0] }));
+        let DynamicImage::ImageRgb8(small) = resize(&DynamicImage::ImageRgb8(rgb), 31, 7).unwrap() else {
+            panic!("rgb stays rgb")
+        };
+        assert_eq!(small.dimensions(), (31, 7));
+        assert_eq!(small.get_pixel(1, 3).0, [0, 0, 255]);
+        assert_eq!(small.get_pixel(29, 3).0, [255, 0, 0]);
+
+        let tiny = resize(&DynamicImage::ImageRgb8(RgbImage::new(3, 3)), 1, 1).unwrap();
+        assert_eq!((tiny.width(), tiny.height()), (1, 1));
+    }
+
+    #[test]
+    fn lower_quality_is_smaller() {
+        let rgb = DynamicImage::ImageRgb8(RgbImage::from_raw(200, 200, pixels(120_000)).unwrap());
+        let sizes: Vec<usize> =
+            LEVELS.iter().map(|&(q, s)| encode(&rgb, q, s).unwrap().data.len()).collect();
+        assert!(sizes.first() > sizes.last(), "{sizes:?}");
+    }
+
+    #[test]
+    fn load_image_normalizes_color_types() {
+        let mut png = Cursor::new(Vec::new());
+        image::GrayAlphaImage::from_raw(2, 1, vec![0, 0, 0, 255])
+            .unwrap()
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        let image = load_image(png.get_ref(), ImageFormat::Png).unwrap();
+        let DynamicImage::ImageLuma8(gray) = image else { panic!("expected gray, got {image:?}") };
+        assert_eq!(gray.as_raw(), &[255, 0], "transparent becomes white, opaque keeps value");
+    }
+
+    /// Pseudo-random 4-bit values: flate roughly halves them.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x9e37_79b9u32;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8 & 0x0f
+            })
+            .collect()
+    }
+
+    fn image_stream(dict: Dictionary, raw: Vec<u8>) -> Stream {
+        let mut stream = Stream::new(dict, raw);
+        stream.compress().unwrap();
+        assert!(stream.dict.has(b"Filter"), "fixture is flate-compressed");
+        stream
+    }
+
+    #[test]
+    fn decodes_flate_images_with_supported_color_spaces() {
+        let mut doc = Document::with_version("1.7");
+        let icc = doc.add_object(Stream::new(dictionary! { "N" => 3 }, vec![]));
+        let base = |cs: Object| {
+            dictionary! {
+                "Subtype" => "Image", "Width" => 40, "Height" => 20,
+                "BitsPerComponent" => 8, "ColorSpace" => cs,
+            }
+        };
+
+        let rgb = image_stream(base("DeviceRGB".into()), vec![128; 2400]);
+        assert!(matches!(decode_image(&doc, &rgb), Some(DynamicImage::ImageRgb8(_))));
+
+        let gray = image_stream(base("DeviceGray".into()), vec![128; 800]);
+        assert!(matches!(decode_image(&doc, &gray), Some(DynamicImage::ImageLuma8(_))));
+
+        let iccbased = vec![Object::Name(b"ICCBased".to_vec()), icc.into()];
+        let icc_rgb = image_stream(base(iccbased.into()), vec![128; 2400]);
+        assert!(decode_image(&doc, &icc_rgb).is_some());
+
+        let cmyk = image_stream(base("DeviceCMYK".into()), vec![128; 3200]);
+        assert!(decode_image(&doc, &cmyk).is_none(), "CMYK is left to rasterization");
+
+        let short = image_stream(base("DeviceRGB".into()), vec![128; 100]);
+        assert!(decode_image(&doc, &short).is_none(), "wrong data length");
+
+        let mut masked = base("DeviceRGB".into());
+        masked.set("Decode", vec![1.into(), 0.into()]);
+        assert!(decode_image(&doc, &image_stream(masked, vec![128; 2400])).is_none());
+
+        let mut form = base("DeviceRGB".into());
+        form.set("Subtype", "Form");
+        assert!(decode_image(&doc, &image_stream(form, vec![128; 2400])).is_none());
+    }
+
+    #[test]
+    fn collect_images_skips_small_images_and_soft_masks() {
+        let mut doc = Document::with_version("1.7");
+        let dict = |w: i64, h: i64, cs: &str| {
+            dictionary! {
+                "Subtype" => "Image", "Width" => w, "Height" => h,
+                "BitsPerComponent" => 8, "ColorSpace" => cs,
+            }
+        };
+        // Decodable like any image, so only the SMask reference excludes it.
+        let mask = doc.add_object(image_stream(dict(200, 150, "DeviceGray"), noise(30_000)));
+        let mut with_mask = dict(200, 150, "DeviceGray");
+        with_mask.set("SMask", mask);
+        with_mask.set("Filter", "FlateDecode");
+        let big = image_stream(dict(200, 150, "DeviceGray"), noise(30_000));
+        assert!(big.content.len() >= MIN_IMAGE_BYTES);
+        let big_id = doc.add_object(Stream::new(with_mask, big.content.clone()).with_compression(false));
+        doc.add_object(image_stream(dict(40, 40, "DeviceGray"), vec![0; 1600]));
+
+        let found: Vec<ObjectId> = collect_images(&doc).iter().map(|s| s.id).collect();
+        assert_eq!(found, [big_id]);
+    }
 }

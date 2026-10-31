@@ -1,1 +1,6 @@
 /target
+/dist
+.DS_Store
+/.flatpak-builder
+/build-dir
+/repo

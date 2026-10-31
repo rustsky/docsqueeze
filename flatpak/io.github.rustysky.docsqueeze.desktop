@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Docsqueeze
+Comment=Make documents fit upload limits
+Exec=docsqueeze
+Icon=io.github.rustysky.docsqueeze
+Categories=Utility;Office;
+Keywords=pdf;compress;shrink;merge;scan;
+Terminal=false

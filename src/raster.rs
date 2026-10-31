@@ -134,8 +134,10 @@ fn render_page(pdf: &Pdf, idx: usize) -> Option<RenderedPage> {
     // Background is opaque white, so premultiplied RGBA equals straight RGBA.
     let rgb: Vec<u8> = pixmap
         .data_as_u8_slice()
-        .chunks_exact(4)
-        .flat_map(|px| [px[0], px[1], px[2]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
         .collect();
 
     let image = if is_grayscale(&rgb) {
@@ -151,9 +153,11 @@ fn render_page(pdf: &Pdf, idx: usize) -> Option<RenderedPage> {
 /// which tolerates scanner noise and tinted paper.
 fn is_grayscale(rgb: &[u8]) -> bool {
     let colored = rgb
-        .chunks_exact(3)
-        .filter(|px| {
-            let (r, g, b) = (px[0] as i16, px[1] as i16, px[2] as i16);
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|&&[r, g, b]| {
+            let (r, g, b) = (r as i16, g as i16, b as i16);
             (r - g).abs().max((g - b).abs()).max((r - b).abs()) > 28
         })
         .count();
@@ -183,4 +187,31 @@ fn strip_pages(doc: &Document, page_ids: &[ObjectId]) -> Document {
     }
     doc.prune_objects();
     doc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grayscale_detection_tolerates_noise() {
+        let gray: Vec<u8> = (0..240u8).flat_map(|i| [i, i + 10, i + 5]).collect();
+        assert!(is_grayscale(&gray));
+
+        // 4% colored pixels still count as gray; 10% do not.
+        let with_color = |colored: usize| {
+            (0..100).flat_map(|i| if i < colored { [255, 0, 0] } else { [128, 128, 128] }).collect::<Vec<u8>>()
+        };
+        assert!(is_grayscale(&with_color(4)));
+        assert!(!is_grayscale(&with_color(10)));
+    }
+
+    #[test]
+    fn levels_get_more_aggressive() {
+        for pair in LEVELS.windows(2) {
+            let ((dpi_a, q_a), (dpi_b, q_b)) = (pair[0], pair[1]);
+            assert!(dpi_b <= dpi_a && q_b <= q_a && (dpi_b, q_b) != (dpi_a, q_a), "{pair:?}");
+        }
+        assert!(LEVELS[0].0 <= RENDER_DPI);
+    }
 }

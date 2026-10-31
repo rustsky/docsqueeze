@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rustysky.docsqueeze</id>
+  <name>Docsqueeze</name>
+  <summary>Make documents fit upload limits</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <developer id="io.github.rustysky">
+    <name>rustysky</name>
+  </developer>
+  <description>
+    <p>
+      Compress PDFs, scans and photos to an exact size and merge them into one
+      PDF for visa, immigration, university and government portals. Works
+      offline, so your files never leave your computer.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.rustysky.docsqueeze.desktop</launchable>
+  <url type="homepage">https://github.com/rustsky/docsqueeze</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.1" date="2026-10-31"/>
+  </releases>
+</component>
